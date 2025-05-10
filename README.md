@@ -43,5 +43,5 @@ mamba activate sicris
 /home/gyk/project/SiCRIS/scripts/batch_process_for_mageck.sh /home/gyk/project/SiCRIS/data/samplesheet.csv 100
 
 # 处理样本，合并gene和promoter数据，并自动运行mageck mle分析
-/home/gyk/project/SiCRIS/scripts/batch_process_for_mageck.sh /home/gyk/project/SiCRIS/data/samplesheet.csv 100 --merge --run-mageck --mode=mle
+/home/gyk/project/SiCRIS/scripts/batch_process_for_mageck.sh /home/gyk/project/SiCRIS/data/samplesheet.csv 100 --run-mageck --mode=mle
 ```

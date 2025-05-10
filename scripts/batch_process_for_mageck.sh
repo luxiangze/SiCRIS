@@ -9,7 +9,6 @@
 #
 # 选项:
 #   --index=NAME   - 指定索引名称
-#   --merge        - 合并gene和promoter数据
 #   --run-mageck   - 自动运行mageck分析
 #   --mode=MODE    - mageck分析模式 (test或mle，默认为test)
 #
@@ -22,10 +21,9 @@ function show_usage {
 	echo "用法: $0 <samplesheet.csv> <crop_length> [选项]"
 	echo "选项:"
 	echo "  --index=NAME   - 指定索引名称"
-	echo "  --merge        - 合并gene和promoter数据"
 	echo "  --run-mageck   - 自动运行mageck分析"
 	echo "  --mode=MODE    - mageck分析模式 (test或mle，默认为test)"
-	echo "示例: $0 /home/gyk/project/SiCRIS/data/samplesheet.csv 100 --merge --run-mageck --mode=mle"
+	echo "示例: $0 /home/gyk/project/SiCRIS/data/samplesheet.csv 100 --run-mageck --mode=mle"
 	exit 1
 }
 
@@ -33,6 +31,13 @@ function show_usage {
 if [ $# -lt 2 ]; then
 	echo "错误: 参数不足"
 	show_usage
+fi
+
+# 检查必要的工具
+if ! command -v csvtk &> /dev/null; then
+	echo "错误: 未找到 csvtk 工具，请先安装 csvtk"
+	echo "安装方法: conda install -c bioconda csvtk 或 pip install csvtk"
+	exit 1
 fi
 
 # 检查样本表文件是否存在
@@ -44,7 +49,6 @@ fi
 SAMPLESHEET="$1"
 CROP_LENGTH="$2"
 INDEX_NAME=""
-MERGE_INDICES=false
 RUN_MAGECK=false
 MAGECK_MODE="test"
 
@@ -54,9 +58,6 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 		--index=*)
 			INDEX_NAME="${1#*=}"
-			;;
-		--merge)
-			MERGE_INDICES=true
 			;;
 		--run-mageck)
 			RUN_MAGECK=true
@@ -141,9 +142,6 @@ log_message "样本表文件: ${SAMPLESHEET}"
 log_message "裁剪长度: ${CROP_LENGTH}"
 if [ -n "${INDEX_NAME}" ]; then
 	log_message "使用指定索引: ${INDEX_NAME}"
-fi
-if [ "$MERGE_INDICES" = true ]; then
-	log_message "将合并gene和promoter索引数据"
 fi
 if [ "$RUN_MAGECK" = true ]; then
 	log_message "将自动运行mageck分析，模式: ${MAGECK_MODE}"
@@ -237,14 +235,8 @@ log_message "检测到以下条件: ${conditions[*]}"
 control_condition="control"
 log_message "使用 '${control_condition}' 作为对照组"
 
-# 处理基因sgRNA计数文件
-if [ -n "${INDEX_NAME}" ]; then
-	# 使用指定索引
-	process_indices=("${INDEX_NAME}")
-else
-	# 使用基因和启动子索引
-	process_indices=("gene" "promoter")
-fi
+# 处理基因和启动子sgRNA计数文件
+process_indices=("gene" "promoter")
 
 # 处理每个索引
 for process_index in "${process_indices[@]}"; do
@@ -286,76 +278,51 @@ for process_index in "${process_indices[@]}"; do
 
 	# 提取sgRNA和基因信息
 	log_message "从样本 ${first_sample} 提取sgRNA和基因信息 (${process_index})"
-	cut -f1,2 "${count_file}" | tail -n +2 > "${tmp_dir}/sgrna_gene.txt"
-
-	# 创建合并的计数文件头部，确保样本名称在第一行
-	printf "sgRNA\tGene" > "${tmp_dir}/count_header.txt"
 	
-	# 为每个样本添加列
-	for sample in "${!sample_conditions[@]}"; do
-		printf "\t%s" "${sample}" >> "${tmp_dir}/count_header.txt"
-	done
-	printf "\n" >> "${tmp_dir}/count_header.txt"
-
-	# 为每个sgRNA准备一个数组来存储所有样本的计数
-	declare -A sgrna_counts
-
-	# 读取sgRNA和基因信息
-	while IFS=$'\t' read -r sgrna gene; do
-		sgrna_counts["${sgrna}"]=""
-	done < "${tmp_dir}/sgrna_gene.txt"
-
-	# 处理每个样本的计数
+	# 使用csvtk提取sgRNA和基因信息
+	csvtk cut -t -f 1,2 "${count_file}" | csvtk del-header -t > "${tmp_dir}/sgrna_gene.txt"
+	
+	# 创建所有样本的计数文件列表
+	sample_count_files=()
 	for sample in "${!sample_conditions[@]}"; do
 		log_message "处理样本 ${sample} 的计数数据 (${process_index})"
-
+		
 		# 确定计数文件路径
 		if [ -n "${INDEX_NAME}" ]; then
 			sample_count_file="${RESULTS_DIR}/${sample}/${sample}.top90.count.mageck.txt"
 		else
 			sample_count_file="${RESULTS_DIR}/${sample}/${sample}.${process_index}.top90.count.mageck.txt"
 		fi
-
+		
 		# 检查计数文件是否存在
 		if [ ! -f "${sample_count_file}" ]; then
 			log_message "警告: 找不到样本 ${sample} 的计数文件 ${sample_count_file}"
-			# 为所有sgRNA添加0计数
-			for sgrna in "${!sgrna_counts[@]}"; do
-				sgrna_counts["${sgrna}"]="${sgrna_counts["${sgrna}"]}\t0"
-			done
 			continue
 		fi
-
-		# 创建临时计数映射文件
-		awk -F'\t' 'NR>1 {print $1 "\t" $3}' "${sample_count_file}" > "${tmp_dir}/${sample}_counts.txt"
-
-		# 读取样本计数并添加到sgrna_counts
-		declare -A sample_count_map
-		while IFS=$'\t' read -r sgrna count; do
-			sample_count_map["${sgrna}"]="${count}"
-		done < "${tmp_dir}/${sample}_counts.txt"
-
-		# 为每个sgRNA添加计数
-		for sgrna in "${!sgrna_counts[@]}"; do
-			if [ -n "${sample_count_map["${sgrna}"]}" ]; then
-				sgrna_counts["${sgrna}"]="${sgrna_counts["${sgrna}"]}\t${sample_count_map["${sgrna}"]}"
-			else
-				sgrna_counts["${sgrna}"]="${sgrna_counts["${sgrna}"]}\t0"
-			fi
-		done
+		
+		# 提取sgRNA和计数信息，并重命名列
+		csvtk cut -t -f 1,3 "${sample_count_file}" | csvtk del-header -t | \
+		csvtk add-header -t -n "sgRNA,${sample}" > "${tmp_dir}/${sample}_counts.txt"
+		
+		sample_count_files+=("${tmp_dir}/${sample}_counts.txt")
 	done
-
-	# 创建合并的计数文件
-	log_message "创建合并的计数文件 (${process_index})"
-	> "${tmp_dir}/counts_only.txt"
-
-	# 将sgRNA和计数写入文件
-	while IFS=$'\t' read -r sgrna gene; do
-		echo -e "${sgrna}\t${gene}${sgrna_counts["${sgrna}"]}" >> "${tmp_dir}/counts_only.txt"
-	done < "${tmp_dir}/sgrna_gene.txt"
-
-	# 合并头部和计数
-	cat "${tmp_dir}/count_header.txt" "${tmp_dir}/counts_only.txt" > "${RESULTS_DIR}/mageck_input/all_samples_${process_index}.count.txt"
+	
+	# 使用csvtk合并所有样本的计数文件
+	log_message "合并所有样本的计数数据 (${process_index})"
+	
+	# 首先创建带有sgRNA和基因信息的基础文件
+	csvtk add-header -t -n "sgRNA,Gene" "${tmp_dir}/sgrna_gene.txt" > "${tmp_dir}/base_file.txt"
+	
+	# 逐个合并样本计数文件
+	merged_file="${tmp_dir}/base_file.txt"
+	for sample_file in "${sample_count_files[@]}"; do
+		temp_merged="${tmp_dir}/temp_merged_$RANDOM.txt"
+		csvtk join -t -f "sgRNA" "$merged_file" "$sample_file" > "$temp_merged"
+		merged_file="$temp_merged"
+	done
+	
+	# 处理缺失值，将NA替换为0
+	csvtk replace -t -p "NA" -r "0" "$merged_file" > "${RESULTS_DIR}/mageck_input/all_samples_${process_index}.count.txt"
 
 	log_message "创建了合并的计数文件: ${RESULTS_DIR}/mageck_input/all_samples_${process_index}.count.txt"
 	set_checkpoint "index_${process_index}_processed"
@@ -366,14 +333,17 @@ for process_index in "${process_indices[@]}"; do
 			log_message "为条件 '${condition}' 创建样本索引文件 (${process_index})"
 
 			# 创建样本索引文件
-			echo -e "sample\tcontrol\ttreatment" > "${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_${process_index}.txt"
-
-			# 添加样本信息
+			design_file="${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_${process_index}.txt"
+			
+			# 使用csvtk创建设计文件
+			echo -e "sample\tcontrol\ttreatment" > "$design_file"
+			
+			# 使用csvtk添加样本信息
 			for sample in "${!sample_conditions[@]}"; do
 				if [ "${sample_conditions[${sample}]}" = "${control_condition}" ]; then
-					echo -e "${sample}\t1\t0" >> "${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_${process_index}.txt"
+					echo -e "${sample}\t1\t0" >> "$design_file"
 				elif [ "${sample_conditions[${sample}]}" = "${condition}" ]; then
-					echo -e "${sample}\t0\t1" >> "${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_${process_index}.txt"
+					echo -e "${sample}\t0\t1" >> "$design_file"
 				fi
 			done
 
@@ -382,108 +352,7 @@ for process_index in "${process_indices[@]}"; do
 	done
 done
 
-# 如果需要合并gene和promoter数据
-if [ "$MERGE_INDICES" = true ] && [ -z "${INDEX_NAME}" ]; then
-	# 检查是否已合并数据
-	if check_checkpoint "indices_merged"; then
-		log_message "gene和promoter数据已合并，跳过合并步骤"
-	else
-	log_message "合并gene和promoter索引数据"
 
-	# 创建临时目录
-	tmp_dir="${RESULTS_DIR}/mageck_input/tmp_merged"
-	mkdir -p "${tmp_dir}"
-
-	# 检查gene和promoter计数文件是否存在
-	gene_count_file="${RESULTS_DIR}/mageck_input/all_samples_gene.count.txt"
-	promoter_count_file="${RESULTS_DIR}/mageck_input/all_samples_promoter.count.txt"
-
-	if [ ! -f "${gene_count_file}" ] || [ ! -f "${promoter_count_file}" ]; then
-		log_message "错误: 找不到gene或promoter计数文件，无法合并"
-	else
-		# 合并gene和promoter计数文件
-		log_message "合并gene和promoter计数文件"
-
-		# 检查并修复gene计数文件的格式
-		log_message "检查并修复gene计数文件的格式"
-		# 提取第一行作为列标题，第二行作为样本名称，合并成正确的格式
-		awk 'BEGIN {FS="\t"; OFS="\t"} 
-		     NR==1 {header=$0} 
-		     NR==2 {samples=$0; split(samples,arr,"\t"); for(i=1;i<=NF;i++) {if(i==1) {printf "%s\t%s", $1, $2} else if(i>2) {printf "\t%s", arr[i-2]}}; printf "\n"} 
-		     NR>2 {print $0}' "${gene_count_file}" > "${tmp_dir}/gene_count_fixed.txt"
-
-		# 检查并修复promoter计数文件的格式
-		log_message "检查并修复promoter计数文件的格式"
-		# 提取第一行作为列标题，第二行作为样本名称，合并成正确的格式
-		awk 'BEGIN {FS="\t"; OFS="\t"} 
-		     NR==1 {header=$0} 
-		     NR==2 {samples=$0; split(samples,arr,"\t"); for(i=1;i<=NF;i++) {if(i==1) {printf "%s\t%s", $1, $2} else if(i>2) {printf "\t%s", arr[i-2]}}; printf "\n"} 
-		     NR>2 {print $0}' "${promoter_count_file}" > "${tmp_dir}/promoter_count_fixed.txt"
-
-		# 提取头部行
-		head -n 1 "${tmp_dir}/gene_count_fixed.txt" > "${tmp_dir}/merged_header.txt"
-
-		# 合并数据行（跳过头部）
-		tail -n +2 "${tmp_dir}/gene_count_fixed.txt" > "${tmp_dir}/gene_data.txt"
-		tail -n +2 "${tmp_dir}/promoter_count_fixed.txt" > "${tmp_dir}/promoter_data.txt"
-
-		# 合并数据
-		cat "${tmp_dir}/gene_data.txt" "${tmp_dir}/promoter_data.txt" > "${tmp_dir}/merged_data.txt"
-
-		# 创建合并的计数文件
-		cat "${tmp_dir}/merged_header.txt" "${tmp_dir}/merged_data.txt" > "${RESULTS_DIR}/mageck_input/all_samples_merged.count.txt"
-
-		# 检查合并后的文件格式是否正确
-		log_message "检查合并后的文件格式"
-		# 显示文件头部以进行调试
-		log_message "文件头部: $(head -n 1 "${RESULTS_DIR}/mageck_input/all_samples_merged.count.txt")"
-		# 修复文件格式，删除可能的转义字符
-		sed -i '1s/\\t/\t/g' "${RESULTS_DIR}/mageck_input/all_samples_merged.count.txt"
-		# 再次检查格式
-		if ! head -n 1 "${RESULTS_DIR}/mageck_input/all_samples_merged.count.txt" | grep -q "piRNA-Rep1"; then
-			log_message "尝试使用备用方法修复文件格式"
-			# 备用方法：直接创建正确的头部
-			printf "sgRNA\tGene" > "${tmp_dir}/fixed_header.txt"
-			for sample in "${!sample_conditions[@]}"; do
-				printf "\t%s" "${sample}" >> "${tmp_dir}/fixed_header.txt"
-			done
-			printf "\n" >> "${tmp_dir}/fixed_header.txt"
-			# 将新头部与原数据合并
-			tail -n +2 "${RESULTS_DIR}/mageck_input/all_samples_merged.count.txt" > "${tmp_dir}/merged_data_only.txt"
-			cat "${tmp_dir}/fixed_header.txt" "${tmp_dir}/merged_data_only.txt" > "${RESULTS_DIR}/mageck_input/all_samples_merged.count.txt"
-			# 再次检查
-			if ! head -n 1 "${RESULTS_DIR}/mageck_input/all_samples_merged.count.txt" | grep -q "piRNA-Rep1"; then
-				handle_error "合并后的文件格式不正确，样本名称未正确显示在标题行" "indices_merged"
-			fi
-		fi
-
-		log_message "创建了合并的计数文件: ${RESULTS_DIR}/mageck_input/all_samples_merged.count.txt"
-		set_checkpoint "indices_merged"
-
-		# 为每个非控制条件创建样本索引文件
-		for condition in "${conditions[@]}"; do
-			if [ "${condition}" != "${control_condition}" ]; then
-				log_message "为条件 '${condition}' 创建样本索引文件 (merged)"
-
-				# 创建样本索引文件
-				echo -e "sample\tcontrol\ttreatment" > "${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_merged.txt"
-
-				# 添加样本信息
-				for sample in "${!sample_conditions[@]}"; do
-					if [ "${sample_conditions[${sample}]}" = "${control_condition}" ]; then
-						echo -e "${sample}\t1\t0" >> "${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_merged.txt"
-					elif [ "${sample_conditions[${sample}]}" = "${condition}" ]; then
-						echo -e "${sample}\t0\t1" >> "${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_merged.txt"
-					fi
-				done
-
-				log_message "创建了样本索引文件: ${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_merged.txt"
-				set_checkpoint "design_${condition}_vs_${control_condition}_merged"
-			fi
-		done
-		fi
-	fi
-fi
 
 # 清理临时文件
 if ! check_checkpoint "tmp_files_cleaned"; then
@@ -505,13 +374,11 @@ if [ "$RUN_MAGECK" = true ]; then
 		log_message "开始运行mageck分析，模式: ${MAGECK_MODE}"
 
 	# 确定要处理的索引
-	if [ -n "${INDEX_NAME}" ]; then
-		run_indices=("${INDEX_NAME}")
-	elif [ "$MERGE_INDICES" = true ]; then
-		run_indices=("merged")
-	else
-		run_indices=("gene" "promoter")
-	fi
+if [ -n "${INDEX_NAME}" ]; then
+	run_indices=("${INDEX_NAME}")
+else
+	run_indices=("gene" "promoter")
+fi
 
 	# 为每个索引和条件运行mageck
 		for run_index in "${run_indices[@]}"; do
@@ -559,30 +426,23 @@ else
 	echo ""
 
 	# 显示mageck命令示例
-	if [ -n "${INDEX_NAME}" ]; then
-		for condition in "${conditions[@]}"; do
-			if [ "${condition}" != "${control_condition}" ]; then
-				echo "mageck test -k ${RESULTS_DIR}/mageck_input/all_samples_${INDEX_NAME}.count.txt -d ${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_${INDEX_NAME}.txt -n ${MAGECK_OUTPUT_DIR}/${condition}_vs_${control_condition}_${INDEX_NAME}"
-				echo "mageck mle -k ${RESULTS_DIR}/mageck_input/all_samples_${INDEX_NAME}.count.txt -d ${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_${INDEX_NAME}.txt -n ${MAGECK_OUTPUT_DIR}/${condition}_vs_${control_condition}_${INDEX_NAME}"
-			fi
-		done
-	elif [ "$MERGE_INDICES" = true ]; then
-		for condition in "${conditions[@]}"; do
-			if [ "${condition}" != "${control_condition}" ]; then
-				echo "mageck test -k ${RESULTS_DIR}/mageck_input/all_samples_merged.count.txt -d ${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_merged.txt -n ${MAGECK_OUTPUT_DIR}/${condition}_vs_${control_condition}_merged"
-				echo "mageck mle -k ${RESULTS_DIR}/mageck_input/all_samples_merged.count.txt -d ${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_merged.txt -n ${MAGECK_OUTPUT_DIR}/${condition}_vs_${control_condition}_merged"
-			fi
-		done
-	else
-		for process_index in "gene" "promoter"; do
-			for condition in "${conditions[@]}"; do
-				if [ "${condition}" != "${control_condition}" ]; then
-					echo "mageck test -k ${RESULTS_DIR}/mageck_input/all_samples_${process_index}.count.txt -d ${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_${process_index}.txt -n ${MAGECK_OUTPUT_DIR}/${condition}_vs_${control_condition}_${process_index}"
-					echo "mageck mle -k ${RESULTS_DIR}/mageck_input/all_samples_${process_index}.count.txt -d ${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_${process_index}.txt -n ${MAGECK_OUTPUT_DIR}/${condition}_vs_${control_condition}_${process_index}"
-				fi
-			done
-		done
+if [ -n "${INDEX_NAME}" ]; then
+	for condition in "${conditions[@]}"; do
+		if [ "${condition}" != "${control_condition}" ]; then
+			echo "mageck test -k ${RESULTS_DIR}/mageck_input/all_samples_${INDEX_NAME}.count.txt -d ${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_${INDEX_NAME}.txt -n ${MAGECK_OUTPUT_DIR}/${condition}_vs_${control_condition}_${INDEX_NAME}"
+			echo "mageck mle -k ${RESULTS_DIR}/mageck_input/all_samples_${INDEX_NAME}.count.txt -d ${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_${INDEX_NAME}.txt -n ${MAGECK_OUTPUT_DIR}/${condition}_vs_${control_condition}_${INDEX_NAME}"
 		fi
+	done
+else
+	for process_index in "gene" "promoter"; do
+		for condition in "${conditions[@]}"; do
+			if [ "${condition}" != "${control_condition}" ]; then
+				echo "mageck test -k ${RESULTS_DIR}/mageck_input/all_samples_${process_index}.count.txt -d ${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_${process_index}.txt -n ${MAGECK_OUTPUT_DIR}/${condition}_vs_${control_condition}_${process_index}"
+				echo "mageck mle -k ${RESULTS_DIR}/mageck_input/all_samples_${process_index}.count.txt -d ${RESULTS_DIR}/mageck_input/${condition}_vs_${control_condition}_${process_index}.txt -n ${MAGECK_OUTPUT_DIR}/${condition}_vs_${control_condition}_${process_index}"
+			fi
+		done
+	done
+fi
 	fi
 fi
 

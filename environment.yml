@@ -19,6 +19,7 @@ dependencies:
   - ca-certificates=2025.2.25=h06a4308_0
   - cairo=1.18.4=h3394656_0
   - cffi=1.17.1=py312h1fdaa30_1
+  - csvtk=0.31.0=h9ee0642_0
   - curl=8.13.0=h332b0f4_0
   - cutadapt=5.0=py312h0fa9677_0
   - decorator=5.1.1=pyhd3eb1b0_0
